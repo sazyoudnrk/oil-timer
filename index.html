@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0b0d14">
+<title>Oil Timer</title>
+<style>
+html,body{margin:0;height:100%;background:#0b0d14;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;font-family:-apple-system,system-ui,sans-serif;color:#cfd6e6}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+#bar{position:fixed;left:0;right:0;bottom:calc(env(safe-area-inset-bottom) + 12px);display:flex;justify-content:center;gap:8px;z-index:2;flex-wrap:wrap;padding:0 12px}
+#bar button{appearance:none;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);color:#dfe6f3;font-size:13px;padding:9px 13px;border-radius:999px;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
+#bar button.on{background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.35)}
+#bar .hide{display:none}
+#st{position:fixed;top:calc(env(safe-area-inset-top) + 8px);left:0;right:0;text-align:center;font-size:11px;opacity:.55;z-index:2;pointer-events:none}
+#start{position:fixed;inset:0;z-index:3;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;background:rgba(8,10,16,.82);text-align:center}
+#start b{font-size:20px;letter-spacing:.08em}
+#start span{font-size:13px;opacity:.7;line-height:1.7}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div id="st"></div>
+<div id="bar">
+  <button id="bLadder" class="on">段々ルート</button>
+  <button id="bGlass">砂時計</button>
+  <button id="bReset">リセット</button>
+  <button id="bFlip" class="hide">反転</button>
+  <button id="bInv" class="hide">軸反転</button>
+</div>
+<div id="start"><b>OIL TIMER</b><span>タップして開始<br>スマホを傾けるとオイルが流れます</span></div>
+<script>
+// ===== SIM START =====
+const W = 300, H = 600;
+const CFG = {
+  N: 380,        // 粒子数
+  h: 16,         // 相互作用半径
+  rho0: 5,       // 静止密度（大きいほど凝集が強い）
+  k: 0.06,       // 圧力
+  kn: 0.3,       // 近距離反発
+  G: 0.035,      // 重力（1サブステップあたり）
+  damp: 0.965,   // 粘性（小さいほどゆっくり）
+  maxV: 2.4,     // 最大速度
+  pr: 3,         // 粒子の当たり半径
+  wr: 2.5,       // 壁の太さ(半分)
+  fric: 0.25     // 壁の摩擦
+};
+const S = { n:0, x:null, y:null, px:null, py:null, t:null, rho:null, rn:null,
+  segs:[], outline:[], gx:0, gy:1, head:null, next:null, cols:0, rows:0 };
+
+function makeSeg(ax, ay, bx, by){
+  const dx = bx-ax, dy = by-ay, l2 = dx*dx+dy*dy, l = Math.sqrt(l2), m = CFG.pr+CFG.wr+2;
+  return { ax, ay, bx, by, dx, dy, l2, l,
+    minx:Math.min(ax,bx)-m, maxx:Math.max(ax,bx)+m, miny:Math.min(ay,by)-m, maxy:Math.max(ay,by)+m };
+}
+let LADDER_HOLE = 13.5, NECK = 13;
+function rotP(p){ return [W-p[0], H-p[1]]; }
+
+// 段々ルート：上下の仕切り（全頂点に穴）＋浮いた斜面。180°回転対称なので逆さにしても同じ動き
+function presetLadder(){
+  const outline = [[20,20],[280,20],[280,580],[20,580]];
+  const lines = [];
+  const xs = [20,85,150,215,280], ys = [116,160,116,160,116];
+  for (let i=0;i<4;i++){
+    const ax=xs[i], ay=ys[i], bx=xs[i+1], by=ys[i+1];
+    const dx=bx-ax, dy=by-ay, l=Math.hypot(dx,dy), ux=dx/l, uy=dy/l;
+    const hh = LADDER_HOLE/2, ga = i===0 ? LADDER_HOLE+1 : hh, gb = i===3 ? LADDER_HOLE+1 : hh;   // 壁際と各頂点に穴
+    lines.push([[ax+ux*ga, ay+uy*ga],[bx-ux*gb, by-uy*gb]]);
+  }
+  lines.push([[58,198],[122,222]]);
+  lines.push([[242,198],[178,222]]);
+  lines.push([[98,248],[140,268]]);
+  lines.push([[202,248],[160,268]]);
+  const half = lines.slice();
+  for (const [a,b] of half) lines.push([rotP(a), rotP(b)]);
+  lines.push([[108,288],[192,312]]); // 中央（自己対称）
+  return { outline, lines, spawnY:[28,108], colors:[[255,79,163],[63,208,255]] };
+}
+// 砂時計：上下2室＋細い穴
+function presetGlass(){
+  const outline = [[34,20],[266,20],[280,34],[280,222],[150+NECK/2,292],[150+NECK/2,308],[280,378],[280,566],[266,580],
+                   [34,580],[20,566],[20,378],[150-NECK/2,308],[150-NECK/2,292],[20,222],[20,34]];
+  return { outline, lines:[], spawnY:[28,200], colors:[[255,176,46],[150,96,255]] };
+}
+
+function pointInPoly(x, y, poly){
+  let c = false;
+  for (let i=0,j=poly.length-1;i<poly.length;j=i++){
+    const [xi,yi]=poly[i], [xj,yj]=poly[j];
+    if (((yi>y)!==(yj>y)) && (x < (xj-xi)*(y-yi)/(yj-yi)+xi)) c = !c;
+  }
+  return c;
+}
+function distSeg(x, y, s){
+  let t = ((x-s.ax)*s.dx+(y-s.ay)*s.dy)/s.l2; t = t<0?0:t>1?1:t;
+  const ex = x-(s.ax+s.dx*t), ey = y-(s.ay+s.dy*t);
+  return Math.sqrt(ex*ex+ey*ey);
+}
+
+function loadPreset(p){
+  S.preset = p;
+  S.outline = p.outline;
+  S.segs = [];
+  const o = p.outline;
+  for (let i=0;i<o.length;i++){ const a=o[i], b=o[(i+1)%o.length]; S.segs.push(makeSeg(a[0],a[1],b[0],b[1])); }
+  for (const [a,b] of p.lines) S.segs.push(makeSeg(a[0],a[1],b[0],b[1]));
+  const N = CFG.N;
+  S.x=new Float32Array(N); S.y=new Float32Array(N); S.px=new Float32Array(N); S.py=new Float32Array(N);
+  S.t=new Uint8Array(N); S.rho=new Float32Array(N); S.rn=new Float32Array(N); S.next=new Int32Array(N);
+  S.cols = Math.ceil(W/CFG.h)+1; S.rows = Math.ceil(H/CFG.h)+1;
+  S.head = new Int32Array(S.cols*S.rows);
+  // 六方格子で上室に配置
+  const sp = 5.6, minD = CFG.pr+CFG.wr+1;
+  let n = 0;
+  for (let row=0; n<N; row++){
+    const y = p.spawnY[0] + row*sp*0.866;
+    if (y > p.spawnY[1]) break;
+    for (let x = 26 + (row&1)*sp/2; x < W-26 && n<N; x += sp){
+      if (!pointInPoly(x,y,o)) continue;
+      let ok = true;
+      for (const s of S.segs) if (distSeg(x,y,s) < minD){ ok=false; break; }
+      if (!ok) continue;
+      S.x[n]=S.px[n]=x; S.y[n]=S.py[n]=y; S.t[n]= x<W/2?0:1; n++;
+    }
+  }
+  S.n = n;
+}
+
+function buildGrid(){
+  const {head,next,x,y,cols,rows} = S, h = CFG.h;
+  head.fill(-1);
+  for (let i=0;i<S.n;i++){
+    let cx = (x[i]/h)|0, cy = (y[i]/h)|0;
+    cx = cx<0?0:cx>=cols?cols-1:cx; cy = cy<0?0:cy>=rows?rows-1:cy;
+    const c = cy*cols+cx; next[i]=head[c]; head[c]=i;
+  }
+}
+
+function step(){
+  const n=S.n, x=S.x, y=S.y, px=S.px, py=S.py, rho=S.rho, rn=S.rn, head=S.head, next=S.next, cols=S.cols, rows=S.rows;
+  const h=CFG.h, h2=h*h, damp=CFG.damp, mv2=CFG.maxV*CFG.maxV;
+  const gx=S.gx*CFG.G, gy=S.gy*CFG.G;
+  // 予測位置
+  for (let i=0;i<n;i++){
+    let vx=(x[i]-px[i])*damp+gx, vy=(y[i]-py[i])*damp+gy;
+    const v2=vx*vx+vy*vy;
+    if (v2>mv2){ const s=CFG.maxV/Math.sqrt(v2); vx*=s; vy*=s; }
+    px[i]=x[i]; py[i]=y[i]; x[i]+=vx; y[i]+=vy;
+  }
+  buildGrid();
+  // 密度
+  for (let i=0;i<n;i++){
+    let d=0, dn=0; const xi=x[i], yi=y[i];
+    const cx=(xi/h)|0, cy=(yi/h)|0;
+    for (let oy=cy-1; oy<=cy+1; oy++){ if (oy<0||oy>=rows) continue;
+      for (let ox=cx-1; ox<=cx+1; ox++){ if (ox<0||ox>=cols) continue;
+        for (let j=head[oy*cols+ox]; j!==-1; j=next[j]){ if (j===i) continue;
+          const dx=x[j]-xi, dy=y[j]-yi, r2=dx*dx+dy*dy;
+          if (r2<h2){ const q=1-Math.sqrt(r2)/h, q2=q*q; d+=q2; dn+=q2*q; }
+        }}}
+    rho[i]=d; rn[i]=dn;
+  }
+  // ダブル密度緩和（Clavet）
+  const k=CFG.k, kn=CFG.kn, rho0=CFG.rho0, maxD=1.6;
+  for (let i=0;i<n;i++){
+    const P=k*(rho[i]-rho0), Pn=kn*rn[i];
+    let ax=0, ay=0; const xi=x[i], yi=y[i];
+    const cx=(xi/h)|0, cy=(yi/h)|0;
+    for (let oy=cy-1; oy<=cy+1; oy++){ if (oy<0||oy>=rows) continue;
+      for (let ox=cx-1; ox<=cx+1; ox++){ if (ox<0||ox>=cols) continue;
+        for (let j=head[oy*cols+ox]; j!==-1; j=next[j]){ if (j===i) continue;
+          const dx=x[j]-xi, dy=y[j]-yi, r2=dx*dx+dy*dy;
+          if (r2<h2 && r2>1e-8){
+            const r=Math.sqrt(r2), q=1-r/h;
+            let D=(P*q+Pn*q*q)*0.5;
+            D = D>maxD?maxD:D<-maxD?-maxD:D;
+            const ux=dx/r*D, uy=dy/r*D;
+            x[j]+=ux; y[j]+=uy; ax-=ux; ay-=uy;
+          }
+        }}}
+    x[i]+=ax; y[i]+=ay;
+  }
+  collide();
+}
+
+function collide(){
+  const n=S.n, x=S.x, y=S.y, px=S.px, py=S.py, segs=S.segs;
+  const R=CFG.pr+CFG.wr, R2=R*R, fr=CFG.fric;
+  for (let i=0;i<n;i++){
+    let xi=x[i], yi=y[i];
+    for (let k=0;k<segs.length;k++){
+      const s=segs[k];
+      if (xi<s.minx||xi>s.maxx||yi<s.miny||yi>s.maxy) continue;
+      const t=((xi-s.ax)*s.dx+(yi-s.ay)*s.dy)/s.l2;
+      let nx, ny, push;
+      if (t>0 && t<1){
+        // 線分の内側：前フレームの側に押し戻す（すり抜け防止）
+        const il=1/s.l;
+        const cr=(s.dx*(yi-s.ay)-s.dy*(xi-s.ax))*il;
+        const cp=(s.dx*(py[i]-s.ay)-s.dy*(px[i]-s.ax))*il;
+        const side = cp>=0?1:-1, sd=cr*side;
+        if (sd>=R) continue;
+        nx=-s.dy*il*side; ny=s.dx*il*side; push=R-sd;
+      } else {
+        const tt=t<=0?0:1, ex=xi-(s.ax+s.dx*tt), ey=yi-(s.ay+s.dy*tt), d2=ex*ex+ey*ey;
+        if (d2>=R2) continue;
+        const d=Math.sqrt(d2)||1e-4; nx=ex/d; ny=ey/d; push=R-d;
+      }
+      xi+=nx*push; yi+=ny*push;
+      // 摩擦：接線方向の速度を減らす
+      const vx=xi-px[i], vy=yi-py[i], vt=vx*(-ny)+vy*nx;
+      px[i]+=(-ny)*vt*fr; py[i]+=nx*vt*fr;
+    }
+    x[i]= xi<1?1:xi>W-1?W-1:xi;
+    y[i]= yi<1?1:yi>H-1?H-1:yi;
+  }
+}
+// ===== SIM END =====
+
+// ===== RENDER =====
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const FS = 1.5, FW = Math.ceil(W/FS), FH = Math.ceil(H/FS);
+const f0 = new Float32Array(FW*FH), f1 = new Float32Array(FW*FH);
+const off = document.createElement('canvas'); off.width = FW; off.height = FH;
+const octx = off.getContext('2d'), img = octx.createImageData(FW, FH), px8 = img.data;
+const KR = 8.5/FS, KR2 = KR*KR;
+let view = { s:1, cx:0, cy:0, dpr:1 };
+
+function resize(){
+  const dpr = Math.min(window.devicePixelRatio||1, 2.5);
+  cv.width = Math.round(innerWidth*dpr); cv.height = Math.round(innerHeight*dpr);
+  const barH = 70, pad = 18;
+  const s = Math.min((innerWidth-pad*2)/W, (innerHeight-barH-pad*2)/H);
+  view = { s, cx:innerWidth/2, cy:(innerHeight-barH)/2+6, dpr };
+}
+addEventListener('resize', resize);
+
+function splat(){
+  f0.fill(0); f1.fill(0);
+  const n=S.n, x=S.x, y=S.y, t=S.t;
+  for (let i=0;i<n;i++){
+    const gx=x[i]/FS, gy=y[i]/FS, f=t[i]?f1:f0;
+    const x0=Math.max(1,Math.ceil(gx-KR)), x1=Math.min(FW-2,Math.floor(gx+KR));
+    const y0=Math.max(1,Math.ceil(gy-KR)), y1=Math.min(FH-2,Math.floor(gy+KR));
+    for (let yy=y0; yy<=y1; yy++){
+      const dy=yy-gy, dy2=dy*dy, row=yy*FW;
+      for (let xx=x0; xx<=x1; xx++){
+        const dx=xx-gx, d2=dx*dx+dy2;
+        if (d2<KR2){ const w=1-d2/KR2; f[row+xx]+=w*w; }
+      }
+    }
+  }
+}
+function sstep(a,b,v){ v=(v-a)/(b-a); v=v<0?0:v>1?1:v; return v*v*(3-2*v); }
+
+function shade(){
+  const [c0,c1] = S.preset.colors;
+  for (let yy=1; yy<FH-1; yy++){
+    for (let xx=1; xx<FW-1; xx++){
+      const i=yy*FW+xx, p=i*4, a=f0[i], b=f1[i], v=a+b;
+      if (v<0.38){ px8[p+3]=0; continue; }
+      const al=sstep(0.4,0.6,v);
+      const m=sstep(0.3,0.7,b/v);
+      const gxv=(f0[i+1]+f1[i+1])-(f0[i-1]+f1[i-1]);
+      const gyv=(f0[i+FW]+f1[i+FW])-(f0[i-FW]+f1[i-FW]);
+      const len=Math.sqrt(gxv*gxv+gyv*gyv)+1e-4;
+      const nl=(gxv*0.55+gyv*0.83)/len;          // 左上からの光
+      const edge=1-sstep(0.55,1.8,v);
+      const lam=0.72+0.28*(1-edge+edge*(0.5+0.5*nl));
+      let sp=nl>0?nl*nl*nl*nl*nl*nl:0; sp*=edge*150;
+      px8[p]  =Math.min(255,(c0[0]+(c1[0]-c0[0])*m)*lam+sp);
+      px8[p+1]=Math.min(255,(c0[1]+(c1[1]-c0[1])*m)*lam+sp);
+      px8[p+2]=Math.min(255,(c0[2]+(c1[2]-c0[2])*m)*lam+sp);
+      px8[p+3]=al*235;
+    }
+  }
+  octx.putImageData(img,0,0);
+}
+
+function pathOutline(){
+  const o=S.outline; ctx.beginPath(); ctx.moveTo(o[0][0],o[0][1]);
+  for (let i=1;i<o.length;i++) ctx.lineTo(o[i][0],o[i][1]);
+  ctx.closePath();
+}
+
+function draw(){
+  const {s,cx,cy,dpr}=view;
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.fillStyle='#0b0d14'; ctx.fillRect(0,0,cv.width,cv.height);
+  ctx.setTransform(s*dpr,0,0,s*dpr,cx*dpr,cy*dpr);
+  ctx.rotate(manual.ang);
+  ctx.translate(-W/2,-H/2);
+  // 外枠
+  pathOutline();
+  ctx.lineJoin='round'; ctx.lineWidth=16; ctx.strokeStyle='#1c2130'; ctx.stroke();
+  ctx.lineWidth=10; ctx.strokeStyle='#272e42'; ctx.stroke();
+  // 透明液
+  const g=ctx.createLinearGradient(0,0,W,0);
+  g.addColorStop(0,'rgba(120,170,230,.10)'); g.addColorStop(.5,'rgba(170,210,255,.05)'); g.addColorStop(1,'rgba(120,170,230,.12)');
+  ctx.fillStyle=g; pathOutline(); ctx.fill();
+  // オイル
+  splat(); shade();
+  ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality='high';
+  ctx.drawImage(off,0,0,FW*FS,FH*FS);
+  // 内部パーツ
+  ctx.lineCap='round';
+  for (const [a,b] of S.preset.lines){
+    ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]);
+    ctx.lineWidth=CFG.wr*2; ctx.strokeStyle='rgba(210,228,255,.55)'; ctx.stroke();
+    ctx.lineWidth=1; ctx.strokeStyle='rgba(255,255,255,.75)'; ctx.stroke();
+  }
+  // 内壁
+  pathOutline(); ctx.lineWidth=CFG.wr*2; ctx.strokeStyle='rgba(210,228,255,.35)'; ctx.stroke();
+  // ガラスの反射
+  ctx.save(); pathOutline(); ctx.clip();
+  const r=ctx.createLinearGradient(0,0,W,0);
+  r.addColorStop(0.06,'rgba(255,255,255,0)'); r.addColorStop(0.1,'rgba(255,255,255,.10)');
+  r.addColorStop(0.16,'rgba(255,255,255,0)'); r.addColorStop(0.86,'rgba(255,255,255,0)');
+  r.addColorStop(0.9,'rgba(255,255,255,.05)'); r.addColorStop(0.93,'rgba(255,255,255,0)');
+  ctx.fillStyle=r; ctx.fillRect(0,0,W,H); ctx.restore();
+}
+
+// ===== INPUT =====
+const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1);
+let inv = false; try{ inv = localStorage.getItem('oiltimer_inv')==='1'; }catch(e){}
+const grav = { x:0, y:1 };
+let gotMotion = false;
+const manual = { on:false, ang:0, target:0 };
+
+function onMotion(e){
+  const a = e.accelerationIncludingGravity;
+  if (!a || a.x==null) return;
+  gotMotion = true;
+  let dx = a.x/9.81, dy = -a.y/9.81;          // iOS：重力方向そのもの
+  if (!isIOS){ dx=-dx; dy=-dy; }              // Android：符号逆
+  if (inv){ dx=-dx; dy=-dy; }
+  const deg = (screen.orientation && typeof screen.orientation.angle==='number') ? screen.orientation.angle : (window.orientation||0);
+  const an = deg*Math.PI/180, c=Math.cos(an), s=Math.sin(an);
+  let sx = dx*c+dy*s, sy = -dx*s+dy*c;
+  const m = Math.hypot(sx,sy); if (m>1.2){ sx*=1.2/m; sy*=1.2/m; }
+  grav.x += (sx-grav.x)*0.35; grav.y += (sy-grav.y)*0.35;
+}
+
+function setSt(t){ document.getElementById('st').textContent = t; }
+function enableManual(why){
+  manual.on = true;
+  setSt('センサー無効（'+(why||'信号なし')+'）・手動モード');
+  document.getElementById('bFlip').classList.remove('hide');
+  document.getElementById('bInv').classList.add('hide');
+}
+
+document.getElementById('start').addEventListener('click', async ()=>{
+  document.getElementById('start').style.display='none';
+  try{
+    if (typeof DeviceMotionEvent!=='undefined' && typeof DeviceMotionEvent.requestPermission==='function'){
+      const r = await DeviceMotionEvent.requestPermission();
+      if (r!=='granted'){ enableManual('許可されず'); return; }
+    }
+    addEventListener('devicemotion', onMotion);
+    document.getElementById('bInv').classList.remove('hide');
+    setSt('センサー待機中…');
+    setTimeout(()=>{ if(!gotMotion) enableManual(); else setSt('センサー有効'); }, 1500);
+  }catch(e){ enableManual(e && e.name || 'エラー'); }
+});
+
+function setPreset(which){
+  loadPreset(which==='glass'?presetGlass():presetLadder());
+  document.getElementById('bLadder').classList.toggle('on', which!=='glass');
+  document.getElementById('bGlass').classList.toggle('on', which==='glass');
+  manual.ang = manual.target = 0;
+}
+document.getElementById('bLadder').onclick = ()=>setPreset('ladder');
+document.getElementById('bGlass').onclick  = ()=>setPreset('glass');
+document.getElementById('bReset').onclick  = ()=>setPreset(S.preset.outline.length>4?'glass':'ladder');
+document.getElementById('bFlip').onclick   = ()=>{ manual.target += Math.PI; };
+document.getElementById('bInv').onclick    = ()=>{ inv=!inv; try{localStorage.setItem('oiltimer_inv',inv?'1':'0');}catch(e){} };
+
+// ===== LOOP =====
+const SUB = 1/180;
+let acc = 0, last = performance.now();
+function frame(now){
+  let dt = (now-last)/1000; last = now; if (dt>0.05) dt=0.05;
+  if (manual.on){
+    manual.ang += (manual.target-manual.ang)*Math.min(1,dt*5);
+    S.gx = Math.sin(manual.ang); S.gy = Math.cos(manual.ang);
+  } else { S.gx = grav.x; S.gy = grav.y; }
+  acc += dt; let k=0;
+  while (acc>=SUB && k<6){ step(); acc-=SUB; k++; }
+  if (k===6) acc=0;
+  draw();
+  requestAnimationFrame(frame);
+}
+resize();
+setPreset('ladder');
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
