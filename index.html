@@ -39,6 +39,7 @@ const CFG = {
   rho0: 5,       // 静止密度（大きいほど凝集が強い）
   k: 0.06,       // 圧力
   kn: 0.3,       // 近距離反発
+  kx: 0.06,      // 異色オイル同士の反発（混ざりにくさ）
   G: 0.035,      // 重力（1サブステップあたり）
   damp: 0.965,   // 粘性（小さいほどゆっくり）
   maxV: 2.4,     // 最大速度
@@ -138,7 +139,7 @@ function buildGrid(){
 }
 
 function step(){
-  const n=S.n, x=S.x, y=S.y, px=S.px, py=S.py, rho=S.rho, rn=S.rn, head=S.head, next=S.next, cols=S.cols, rows=S.rows;
+  const n=S.n, x=S.x, y=S.y, t=S.t, px=S.px, py=S.py, rho=S.rho, rn=S.rn, head=S.head, next=S.next, cols=S.cols, rows=S.rows;
   const h=CFG.h, h2=h*h, damp=CFG.damp, mv2=CFG.maxV*CFG.maxV;
   const gx=S.gx*CFG.G, gy=S.gy*CFG.G;
   // 予測位置
@@ -151,13 +152,13 @@ function step(){
   buildGrid();
   // 密度
   for (let i=0;i<n;i++){
-    let d=0, dn=0; const xi=x[i], yi=y[i];
+    let d=0, dn=0; const xi=x[i], yi=y[i], ti=t[i];
     const cx=(xi/h)|0, cy=(yi/h)|0;
     for (let oy=cy-1; oy<=cy+1; oy++){ if (oy<0||oy>=rows) continue;
       for (let ox=cx-1; ox<=cx+1; ox++){ if (ox<0||ox>=cols) continue;
         for (let j=head[oy*cols+ox]; j!==-1; j=next[j]){ if (j===i) continue;
           const dx=x[j]-xi, dy=y[j]-yi, r2=dx*dx+dy*dy;
-          if (r2<h2){ const q=1-Math.sqrt(r2)/h, q2=q*q; d+=q2; dn+=q2*q; }
+          if (r2<h2){ const q=1-Math.sqrt(r2)/h, q2=q*q; if (t[j]===ti) d+=q2; dn+=q2*q; }
         }}}
     rho[i]=d; rn[i]=dn;
   }
@@ -165,7 +166,7 @@ function step(){
   const k=CFG.k, kn=CFG.kn, rho0=CFG.rho0, maxD=1.6;
   for (let i=0;i<n;i++){
     const P=k*(rho[i]-rho0), Pn=kn*rn[i];
-    let ax=0, ay=0; const xi=x[i], yi=y[i];
+    let ax=0, ay=0; const xi=x[i], yi=y[i], ti=t[i];
     const cx=(xi/h)|0, cy=(yi/h)|0;
     for (let oy=cy-1; oy<=cy+1; oy++){ if (oy<0||oy>=rows) continue;
       for (let ox=cx-1; ox<=cx+1; ox++){ if (ox<0||ox>=cols) continue;
@@ -173,7 +174,7 @@ function step(){
           const dx=x[j]-xi, dy=y[j]-yi, r2=dx*dx+dy*dy;
           if (r2<h2 && r2>1e-8){
             const r=Math.sqrt(r2), q=1-r/h;
-            let D=(P*q+Pn*q*q)*0.5;
+            let D = (t[j]===ti ? P*q+Pn*q*q : Pn*q*q+CFG.kx*q)*0.5;  // 異色同士は凝集せず反発のみ
             D = D>maxD?maxD:D<-maxD?-maxD:D;
             const ux=dx/r*D, uy=dy/r*D;
             x[j]+=ux; y[j]+=uy; ax-=ux; ay-=uy;
@@ -261,7 +262,7 @@ function shade(){
       const i=yy*FW+xx, p=i*4, a=f0[i], b=f1[i], v=a+b;
       if (v<0.38){ px8[p+3]=0; continue; }
       const al=sstep(0.4,0.6,v);
-      const m=sstep(0.3,0.7,b/v);
+      const m=sstep(0.42,0.58,b/v);
       const gxv=(f0[i+1]+f1[i+1])-(f0[i-1]+f1[i-1]);
       const gyv=(f0[i+FW]+f1[i+FW])-(f0[i-FW]+f1[i-FW]);
       const len=Math.sqrt(gxv*gxv+gyv*gyv)+1e-4;
