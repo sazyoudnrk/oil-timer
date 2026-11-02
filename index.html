@@ -29,6 +29,7 @@ canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
     <button data-p="glass">砂時計</button>
     <button data-p="coil">ぐるぐる</button>
     <button data-p="maze">迷路</button>
+    <button data-p="gear">歯車</button>
   </div>
   <div class="row">
   <button id="bReset">リセット</button>
@@ -92,41 +93,62 @@ function presetGlass(){
   return { outline, lines:[], spawnY:[28,200], colors:[[255,176,46],[150,96,255]] };
 }
 
-// ぐるぐる：漏斗から下り続ける蛇行パイプ。中心線がyに単調なので逆さでも逆流する
-let PIPE_W = 12, FRIC_COIL = 0.03, FRIC_MAZE = 0.08, MAZE_SLOPE = 0.28;      // パイプ壁の中心から中心線までの距離
-function presetCoil(){
-  const outline = [[20,20],[280,20],[280,580],[20,580]];
-  const xL = 58, xR = 242, xm = W/2, y0 = 132, y1 = 146, rt = 22;
-  // 下り勾配 s を全体の高さから逆算：2本の半ラン(92)+3本の全ラン(184)+4ターン
-  const halfL = xR-xm, fullL = xR-xL;
-  const s = ((H-y1) - y1 - 8*rt) / (2*halfL + 3*fullL);
-  const cl = [[xm,y0],[xm,y1]];
-  let x = xm, y = y1, dir = 1;
-  const runs = [halfL, fullL, fullL, fullL, halfL];
-  for (let r=0;r<5;r++){
-    x += dir*runs[r]; y += s*runs[r]; cl.push([x,y]);
-    if (r<4){
-      const cx = x, cy = y+rt;            // 外側へ半円ターン
-      for (let k=1;k<=14;k++){
-        const a = -Math.PI/2 + Math.PI*k/14;
-        cl.push([cx + dir*Math.cos(a)*rt, cy + Math.sin(a)*rt]);
-      }
-      y += 2*rt; dir = -dir;
+// ぐるぐる：大中小のリングに穴。全リングに真上・真下の穴があり、180°回転対称
+let RING_HOLE = 20, FRIC_COIL = 0.12, FRIC_MAZE = 0.08, MAZE_SLOPE = 0.28;
+function ringLines(cx, cy, r, gapsDeg, out){
+  const G = RING_HOLE;
+  const hw = Math.asin(Math.min(0.95, G/2/r));                 // 穴の半角
+  const gaps = gapsDeg.map(d=>d*Math.PI/180).sort((a,b)=>a-b);
+  for (let i=0;i<gaps.length;i++){
+    const a0 = gaps[i] + hw, a1 = (i+1<gaps.length ? gaps[i+1] : gaps[0]+Math.PI*2) - hw;
+    if (a1 - a0 < 0.05) continue;
+    const steps = Math.max(2, Math.ceil((a1-a0)/(Math.PI/14)));
+    let prev = [cx+Math.cos(a0)*r, cy+Math.sin(a0)*r];
+    for (let k=1;k<=steps;k++){
+      const a = a0 + (a1-a0)*k/steps, p = [cx+Math.cos(a)*r, cy+Math.sin(a)*r];
+      out.push([prev,p]); prev = p;
     }
   }
-  cl.push([xm, H-y0]);
-  // 中心線を左右にオフセットして壁にする
-  const off = (sgn)=>cl.map((p,i)=>{
-    const a = cl[Math.max(0,i-1)], b = cl[Math.min(cl.length-1,i+1)];
-    let tx = b[0]-a[0], ty = b[1]-a[1]; const l = Math.hypot(tx,ty); tx/=l; ty/=l;
-    return [p[0] - ty*PIPE_W*sgn, p[1] + tx*PIPE_W*sgn];
-  });
-  const A = off(1), B = off(-1), lines = [];
-  for (const P of [A,B]) for (let i=0;i<P.length-1;i++) lines.push([P[i],P[i+1]]);
-  // 上下の漏斗
-  const fun = [[[20,96],A[0]],[[280,96],B[0]]];
-  for (const [a,b] of fun){ lines.push([a,b]); lines.push([rotP(a),rotP(b)]); }
-  return { outline, lines, spawnY:[28,90], fric:FRIC_COIL, colors:[[52,230,160],[255,96,84]] };
+}
+function wallFunnel(holeX, yWall, yHole, out){
+  // 壁際にも穴を残した V 字（逆さにすると Λ になり、壁際の穴から抜ける）
+  const G = LADDER_HOLE;
+  out.push([[20+G+1, yWall],[holeX-G/2, yHole]]);
+  out.push([[holeX+G/2, yHole],[280-G-1, yWall]]);
+}
+function presetCoil(){
+  const outline = [[20,20],[280,20],[280,580],[20,580]];
+  const half = [];
+  wallFunnel(150, 84, 116, half);
+  // [cx, cy, r, 追加の穴(度) 0=右 90=下]
+  const rings = [
+    [122,172,34,[300,200,20]],
+    [212,146,14,[0]],
+    [224,214,24,[170,320]],
+    [66,252,22,[0]],
+  ];
+  for (const [cx,cy,r,g] of rings) ringLines(cx,cy,r,[90,270,...g],half);
+  const lines = [];
+  for (const l of half){ lines.push(l); lines.push([rotP(l[0]),rotP(l[1])]); }
+  ringLines(150,300,56,[90,270,20,200,140,320],lines);   // 中央の大リング（自己対称）
+  return { outline, lines, spawnY:[28,80], spawnX:[36,264], fric:FRIC_COIL, colors:[[52,230,160],[255,96,84]] };
+}
+
+// 歯車：オイルが中央の大歯車に当たって回り、左右の小歯車がかみ合って回る
+let GEAR_K = 6e-6, GEAR_DAMP = 0.994, GEAR_MAXW = 0.03;
+function presetGear(){
+  const outline = [[20,20],[280,20],[280,580],[20,580]];
+  const half = [];
+  wallFunnel(116, 82, 124, half);
+  const lines = [];
+  for (const l of half){ lines.push(l); lines.push([rotP(l[0]),rotP(l[1])]); }
+  const R1 = 64, R2 = 30, D = R1 + R2 - 8;
+  const wheels = [
+    { cx:150,   cy:300, r0:15, r1:R1, n:8, ratio:1,  phase:0 },
+    { cx:150-D, cy:300, r0:9,  r1:R2, n:4, ratio:-2, phase:Math.PI/4 },
+    { cx:150+D, cy:300, r0:9,  r1:R2, n:4, ratio:-2, phase:Math.PI/4 },
+  ];
+  return { outline, lines, wheels, spawnY:[28,76], spawnX:[36,264], colors:[[255,150,60],[90,200,255]] };
 }
 
 // 迷路：少し傾いた床（両端に穴）と縦の仕切り。180°回転対称
@@ -167,7 +189,7 @@ function presetMaze(){
   }
   return { outline, lines, spawnY:[28,86], fric:FRIC_MAZE, colors:[[255,214,64],[86,130,255]] };
 }
-const PRESETS = { ladder:presetLadder, glass:presetGlass, coil:presetCoil, maze:presetMaze };
+const PRESETS = { ladder:presetLadder, glass:presetGlass, coil:presetCoil, maze:presetMaze, gear:presetGear };
 
 function pointInPoly(x, y, poly){
   let c = false;
@@ -191,6 +213,17 @@ function loadPreset(p){
   const o = p.outline;
   for (let i=0;i<o.length;i++){ const a=o[i], b=o[(i+1)%o.length]; S.segs.push(makeSeg(a[0],a[1],b[0],b[1])); }
   for (const [a,b] of p.lines) S.segs.push(makeSeg(a[0],a[1],b[0],b[1]));
+  // 歯車：軸（静止した多角形）＋回転する歯
+  S.wheels = p.wheels || []; S.wAng = 0; S.wOm = 0; S.tq = 0;
+  for (const w of S.wheels){
+    const m = 12;
+    for (let k=0;k<m;k++){
+      const a0=k/m*Math.PI*2, a1=(k+1)/m*Math.PI*2;
+      S.segs.push(makeSeg(w.cx+Math.cos(a0)*w.r0, w.cy+Math.sin(a0)*w.r0, w.cx+Math.cos(a1)*w.r0, w.cy+Math.sin(a1)*w.r0));
+    }
+  }
+  S.nStatic = S.segs.length;
+  updateWheels();
   const N = CFG.N;
   S.x=new Float32Array(N); S.y=new Float32Array(N); S.px=new Float32Array(N); S.py=new Float32Array(N);
   S.t=new Uint8Array(N); S.rho=new Float32Array(N); S.rn=new Float32Array(N); S.next=new Int32Array(N);
@@ -202,7 +235,8 @@ function loadPreset(p){
   for (let row=0; n<N; row++){
     const y = p.spawnY[0] + row*sp*0.866;
     if (y > p.spawnY[1]) break;
-    for (let x = 26 + (row&1)*sp/2; x < W-26 && n<N; x += sp){
+    const sx0 = p.spawnX ? p.spawnX[0] : 26, sx1 = p.spawnX ? p.spawnX[1] : W-26;
+    for (let x = sx0 + (row&1)*sp/2; x < sx1 && n<N; x += sp){
       if (!pointInPoly(x,y,o)) continue;
       let ok = true;
       for (const s of S.segs) if (distSeg(x,y,s) < minD){ ok=false; break; }
@@ -223,7 +257,26 @@ function buildGrid(){
   }
 }
 
+function updateWheels(){
+  S.segs.length = S.nStatic;
+  for (const w of S.wheels){
+    const base = w.phase + w.ratio*S.wAng;
+    for (let k=0;k<w.n;k++){
+      const a = base + k/w.n*Math.PI*2, c=Math.cos(a), s=Math.sin(a);
+      const sg = makeSeg(w.cx+c*w.r0, w.cy+s*w.r0, w.cx+c*w.r1, w.cy+s*w.r1);
+      sg.w = w; S.segs.push(sg);
+    }
+  }
+}
+function stepWheels(){
+  if (!S.wheels.length) return;
+  S.wOm = (S.wOm + S.tq*GEAR_K) * GEAR_DAMP;
+  if (S.wOm > GEAR_MAXW) S.wOm = GEAR_MAXW; else if (S.wOm < -GEAR_MAXW) S.wOm = -GEAR_MAXW;
+  S.wAng += S.wOm; S.tq = 0;
+  updateWheels();
+}
 function step(){
+  stepWheels();
   const n=S.n, x=S.x, y=S.y, t=S.t, px=S.px, py=S.py, rho=S.rho, rn=S.rn, head=S.head, next=S.next, cols=S.cols, rows=S.rows;
   const h=CFG.h, h2=h*h, damp=CFG.damp, mv2=CFG.maxV*CFG.maxV;
   const gx=S.gx*CFG.G, gy=S.gy*CFG.G;
@@ -294,6 +347,7 @@ function collide(){
         const d=Math.sqrt(d2)||1e-4; nx=ex/d; ny=ey/d; push=R-d;
       }
       xi+=nx*push; yi+=ny*push;
+      if (s.w){ const w=s.w; S.tq -= ((xi-w.cx)*ny - (yi-w.cy)*nx)*push*w.ratio; }   // 反作用トルク
       // 摩擦：接線方向の速度を減らす
       const vx=xi-px[i], vy=yi-py[i], vt=vx*(-ny)+vy*nx;
       px[i]+=(-ny)*vt*fr; py[i]+=nx*vt*fr;
@@ -400,6 +454,25 @@ function draw(){
   }
   ctx.lineWidth=CFG.wr*2; ctx.strokeStyle='rgba(210,228,255,.55)'; ctx.stroke();
   ctx.lineWidth=1; ctx.strokeStyle='rgba(255,255,255,.75)'; ctx.stroke();
+  // 歯車
+  for (const w of S.wheels){
+    const base = w.phase + w.ratio*S.wAng;
+    ctx.save(); ctx.translate(w.cx, w.cy); ctx.rotate(base);
+    ctx.beginPath();
+    for (let k=0;k<w.n;k++){
+      const a = k/w.n*Math.PI*2;
+      ctx.moveTo(Math.cos(a)*w.r0, Math.sin(a)*w.r0); ctx.lineTo(Math.cos(a)*w.r1, Math.sin(a)*w.r1);
+    }
+    ctx.lineCap='round';
+    ctx.lineWidth=CFG.wr*2+1.5; ctx.strokeStyle='rgba(200,214,240,.6)'; ctx.stroke();
+    ctx.lineWidth=1.2; ctx.strokeStyle='rgba(255,255,255,.85)'; ctx.stroke();
+    ctx.beginPath(); ctx.arc(0,0,w.r0+CFG.wr,0,Math.PI*2);
+    ctx.fillStyle='#2a3247'; ctx.fill();
+    ctx.lineWidth=1.5; ctx.strokeStyle='rgba(220,232,255,.7)'; ctx.stroke();
+    ctx.beginPath(); ctx.arc(0,0,w.r0*0.55,0,Math.PI*2); ctx.strokeStyle='rgba(220,232,255,.35)'; ctx.stroke();
+    ctx.beginPath(); ctx.arc(0,0,2.2,0,Math.PI*2); ctx.fillStyle='rgba(230,240,255,.9)'; ctx.fill();
+    ctx.restore();
+  }
   // 内壁
   pathOutline(); ctx.lineWidth=CFG.wr*2; ctx.strokeStyle='rgba(210,228,255,.35)'; ctx.stroke();
   // ガラスの反射
