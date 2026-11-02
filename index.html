@@ -15,6 +15,15 @@ canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
 #bar button.on{background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.35)}
 #bar .hide{display:none}
 #st{position:fixed;top:calc(env(safe-area-inset-top) + 8px);left:0;right:0;text-align:center;font-size:11px;opacity:.55;z-index:2;pointer-events:none}
+#dbg{position:fixed;left:8px;right:8px;top:calc(env(safe-area-inset-top) + 24px);z-index:4;background:rgba(14,17,26,.72);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,.14);border-radius:14px;padding:10px 12px;max-height:44vh;overflow:auto;touch-action:pan-y;font-size:12px}
+#dbg.hide{display:none}
+#dbg .r{display:grid;grid-template-columns:78px 1fr 48px;align-items:center;gap:8px;padding:3px 0}
+#dbg .r small{display:block;opacity:.5;font-size:10px}
+#dbg input[type=range]{width:100%;touch-action:pan-x}
+#dbg .v{text-align:right;font-variant-numeric:tabular-nums}
+#dbg .dbtn{display:flex;gap:8px;margin-top:8px}
+#dbg .dbtn button{flex:1;appearance:none;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.08);color:#dfe6f3;font-size:12px;padding:8px;border-radius:10px}
+#dbg textarea{width:100%;box-sizing:border-box;margin-top:8px;height:52px;background:rgba(0,0,0,.3);color:#cfd6e6;border:1px solid rgba(255,255,255,.1);border-radius:8px;font-size:11px;display:none;-webkit-user-select:text;user-select:text}
 #start{position:fixed;inset:0;z-index:3;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;background:rgba(8,10,16,.82);text-align:center}
 #start b{font-size:20px;letter-spacing:.08em}
 #start span{font-size:13px;opacity:.7;line-height:1.7}
@@ -33,9 +42,16 @@ canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
   </div>
   <div class="row">
   <button id="bReset">リセット</button>
+  <button id="bDbg">調整</button>
   <button id="bFlip" class="hide">反転</button>
   <button id="bInv" class="hide">軸反転</button>
   </div>
+</div>
+<div id="dbg" class="hide">
+  <div id="dbgRows"></div>
+  <div style="opacity:.5;font-size:10px;margin-top:4px">※粒子数は変えるとリセット。他は即反映（形を変えても保持、壁の摩擦だけ形ごと）</div>
+  <div class="dbtn"><button id="dbgCopy">値をコピー</button><button id="dbgDef">初期値</button><button id="dbgClose">閉じる</button></div>
+  <textarea id="dbgOut" readonly></textarea>
 </div>
 <div id="start"><b>OIL TIMER</b><span>タップして開始<br>スマホを傾けるとオイルが流れます</span></div>
 <script>
@@ -65,6 +81,21 @@ function makeSeg(ax, ay, bx, by){
 }
 let LADDER_HOLE = 13.5, NECK = 13;
 function rotP(p){ return [W-p[0], H-p[1]]; }
+let TOOTH_D = 20;
+
+// 外枠を漏斗にする：上室→首→仕掛けの部屋→首→下室（壁際に隙間なし、180°回転対称）
+function neckOutline(c, nw){
+  const L = c-nw/2, R = c+nw/2;
+  const TL = [[20,82],[L,124],[L,136],[20,200]], TR = [[280,82],[R,124],[R,136],[280,200]];
+  return [[20,20],[280,20], ...TR, ...TL.map(rotP), [280,580],[20,580], ...TR.map(rotP), ...TL.slice().reverse()];
+}
+// 壁の内向きの返し：上半分で指定し、180°回転で下半分も作る。返しの上面は内側へ下る斜面、下面は張り出し
+function wallTeeth(leftYs, rightYs, out, d=TOOTH_D, h=26){
+  const half = [];
+  for (const y of leftYs){ half.push([[20,y],[20+d,y+h*0.55]]); half.push([[20+d,y+h*0.55],[20,y+h]]); }
+  for (const y of rightYs){ half.push([[280,y],[280-d,y+h*0.55]]); half.push([[280-d,y+h*0.55],[280,y+h]]); }
+  for (const l of half){ out.push(l); out.push([rotP(l[0]),rotP(l[1])]); }
+}
 
 // 段々ルート：上下の仕切り（全頂点に穴）＋浮いた斜面。180°回転対称なので逆さにしても同じ動き
 function presetLadder(){
@@ -84,6 +115,7 @@ function presetLadder(){
   const half = lines.slice();
   for (const [a,b] of half) lines.push([rotP(a), rotP(b)]);
   lines.push([[108,288],[192,312]]); // 中央（自己対称）
+  wallTeeth([170,232],[170,232],lines);
   return { outline, lines, spawnY:[28,108], colors:[[255,79,163],[63,208,255]] };
 }
 // 砂時計：上下2室＋細い穴
@@ -94,7 +126,7 @@ function presetGlass(){
 }
 
 // ぐるぐる（蚊取り線香）
-let RING_HOLE = 20, COIL_GAP = 21, COIL_IN = 154, FRIC_COIL = 0.12, FRIC_MAZE = 0.08, MAZE_SLOPE = 0.28;
+let RING_HOLE = 20, COIL_GAP = 21, COIL_IN = 156, COIL_STEP = 40, COIL_HOLES = 3, FRIC_COIL = 0.12, FRIC_MAZE = 0.08, MAZE_SLOPE = 0.28;
 function ringLines(cx, cy, r, gapsDeg, out){
   const G = RING_HOLE;
   const hw = Math.asin(Math.min(0.95, G/2/r));                 // 穴の半角
@@ -122,17 +154,18 @@ function presetCoil(){
   const cx = W/2, cy = H/2, r0 = 12, rMax = 110, gap = COIL_GAP;
   const b = gap/Math.PI;                         // 2本なので1周で 2*gap 外へ
   const thMax = (rMax - r0)/b;
-  const extra = [[200],[320,150],[230],[30,300],[190]];   // 巻きごとの追加穴（度）
   const lines = [];
   const half = RING_HOLE/2;
+  // 外側から数えた巻き番号 L ごとに、穴を COIL_STEP 度ずつ回す（180°反対側にも穴）。いちばん外だけ真上・真下＝入口
   const isGap = (th, r)=>{
-    const k = Math.floor(th/(Math.PI*2));
-    const phi = Math.atan(b/r);                  // らせんの最下点・最上点は少しずれる
-    const cand = [Math.PI/2+phi, Math.PI*1.5+phi, ...(extra[k]||[]).map(d=>d*Math.PI/180)];
+    const L = Math.floor((thMax - th)/(Math.PI*2));
+    const phi = Math.atan(b/r);
+    const base = Math.PI*1.5 + phi + L*COIL_STEP*Math.PI/180;
     const hw = Math.asin(Math.min(0.99, half/r));
     const a = ((th % (Math.PI*2)) + Math.PI*2) % (Math.PI*2);
-    for (const c of cand){
-      let d = Math.abs(a-c); d = Math.min(d, Math.PI*2-d);
+    for (let m=0;m<COIL_HOLES;m++){
+      const c = base + m*Math.PI*2/COIL_HOLES;
+      let d = Math.abs(a - (((c % (Math.PI*2)) + Math.PI*2) % (Math.PI*2))); d = Math.min(d, Math.PI*2-d);
       if (d < hw) return true;
     }
     return false;
@@ -149,27 +182,21 @@ function presetCoil(){
       lines.push([p(pts[i]), p(pts[i+1])]);
     }
   }
-  const fun = [];
-  wallFunnel(COIL_IN, 84, 118, fun);
-  for (const l of fun){ lines.push(l); lines.push([rotP(l[0]),rotP(l[1])]); }
-  return { outline, lines, spawnY:[28,80], spawnX:[36,264], fric:FRIC_COIL, colors:[[52,230,160],[255,96,84]] };
+  return { outline:neckOutline(COIL_IN, 16), lines, spawnY:[28,100], fric:FRIC_COIL, colors:[[52,230,160],[255,96,84]] };
 }
 
 // 歯車：オイルが中央の大歯車に当たって回り、左右の小歯車がかみ合って回る
-let GEAR_K = 6e-6, GEAR_DAMP = 0.994, GEAR_MAXW = 0.03;
+let GEAR_NECK = 16, GEAR_K = 6e-6, GEAR_DAMP = 0.994, GEAR_MAXW = 0.03;
 function presetGear(){
-  const outline = [[20,20],[280,20],[280,580],[20,580]];
-  const half = [];
-  wallFunnel(150, 82, 124, half);
+  const outline = neckOutline(150, GEAR_NECK);
   const lines = [];
-  for (const l of half){ lines.push(l); lines.push([rotP(l[0]),rotP(l[1])]); }
   const R1 = 64, R2 = 30, D = R1 + R2 - 8;
   const wheels = [
     { cx:150,   cy:300, r0:15, r1:R1, n:8, ratio:1,  phase:0 },
     { cx:150-D, cy:300, r0:9,  r1:R2, n:4, ratio:-2, phase:Math.PI/4 },
     { cx:150+D, cy:300, r0:9,  r1:R2, n:4, ratio:-2, phase:Math.PI/4 },
   ];
-  return { outline, lines, wheels, spawnY:[28,76], spawnX:[36,264], colors:[[255,150,60],[90,200,255]] };
+  return { outline, lines, wheels, spawnY:[28,100], colors:[[255,150,60],[90,200,255]] };
 }
 
 // 迷路：少し傾いた床（両端に穴）と縦の仕切り。180°回転対称
@@ -179,9 +206,8 @@ function presetMaze(){
   // [y, [[x0,x1,低い側]...]]  低い側 'L'|'R'
   const levels = [
     [100, [[20,110,'R'],[110,280,'L']]],
-    [152, [[20,72,'L'],[72,196,'R'],[196,280,'R']]],
-    [204, [[20,134,'L'],[134,224,'R'],[224,280,'L']]],
-    [256, [[20,92,'R'],[92,202,'L'],[202,280,'R']]],
+    [166, [[20,80,'L'],[80,200,'R'],[200,280,'R']]],
+    [232, [[20,140,'L'],[140,220,'R'],[220,280,'L']]],
   ];
   const center = [300, [[20,150,'L'],[150,280,'L']]];   // 自己対称
   const build = (y, spec, prevY, out)=>{
@@ -208,6 +234,7 @@ function presetMaze(){
     lines.push(l);
     if (l[0][0]===l[1][0]) lines.push([rotP(l[0]),rotP(l[1])]);   // 中央の仕切りも対称に
   }
+  wallTeeth([122,188,254],[122,188,254],lines,16,20);
   return { outline, lines, spawnY:[28,86], fric:FRIC_MAZE, colors:[[255,214,64],[86,130,255]] };
 }
 const PRESETS = { ladder:presetLadder, glass:presetGlass, coil:presetCoil, maze:presetMaze, gear:presetGear };
@@ -385,7 +412,7 @@ const FS = 1.5, FW = Math.ceil(W/FS), FH = Math.ceil(H/FS);
 const f0 = new Float32Array(FW*FH), f1 = new Float32Array(FW*FH);
 const off = document.createElement('canvas'); off.width = FW; off.height = FH;
 const octx = off.getContext('2d'), img = octx.createImageData(FW, FH), px8 = img.data;
-const KR = 8.5/FS, KR2 = KR*KR;
+let KR = 8.5/FS, KR2 = KR*KR;
 let view = { s:1, cx:0, cy:0, dpr:1 };
 
 function resize(){
@@ -555,11 +582,66 @@ function setPreset(which){
   for (const b of document.querySelectorAll('#shapes button')) b.classList.toggle('on', b.dataset.p===curPreset);
   manual.ang = manual.target = 0;
   try{ localStorage.setItem('oiltimer_preset', curPreset); }catch(e){}
+  const dp = document.getElementById('dbg'); if (dp && !dp.classList.contains('hide') && typeof dbgBuild==='function') dbgBuild();
 }
 for (const b of document.querySelectorAll('#shapes button')) b.onclick = ()=>setPreset(b.dataset.p);
 document.getElementById('bReset').onclick  = ()=>setPreset(curPreset);
 document.getElementById('bFlip').onclick   = ()=>{ manual.target += Math.PI; };
 document.getElementById('bInv').onclick    = ()=>{ inv=!inv; try{localStorage.setItem('oiltimer_inv',inv?'1':'0');}catch(e){} };
+
+
+// ===== DEBUG PANEL（一時的なパラメータ調整） =====
+const DBG = [
+  ['N','粒子数※',100,800,10],
+  ['rho0','まとまり',1,10,0.1],
+  ['k','圧力',0.01,0.2,0.005],
+  ['kn','近距離反発',0,1,0.01],
+  ['kx','異色の反発',0,0.3,0.005],
+  ['G','重力',0.005,0.1,0.001],
+  ['damp','粘り(小=重)',0.9,0.999,0.001],
+  ['maxV','最大速度',0.5,5,0.1],
+  ['fric','壁の摩擦',0,0.5,0.01],
+  ['blob','見た目太さ',4,14,0.5],
+  ['gearK','歯車の回り',0,30,0.5],
+];
+const DEF = {}; for (const [k] of DBG) DEF[k] = dbgGet(k);
+function dbgGet(k){
+  if (k==='fric') return S.fric!=null ? S.fric : CFG.fric;
+  if (k==='blob') return KR*FS;
+  if (k==='gearK') return GEAR_K*1e6;
+  return CFG[k];
+}
+function dbgSet(k, v){
+  if (k==='fric'){ S.fric = v; return; }
+  if (k==='blob'){ KR = v/FS; KR2 = KR*KR; return; }
+  if (k==='gearK'){ GEAR_K = v*1e-6; return; }
+  CFG[k] = v;
+  if (k==='N') setPreset(curPreset);
+}
+function fmt(v, st){ const d = Math.max(0, -Math.floor(Math.log10(st)+1e-9)); return (+v).toFixed(d); }
+function dbgBuild(){
+  const box = document.getElementById('dbgRows'); box.innerHTML = '';
+  for (const [k,label,mn,mx,st] of DBG){
+    const row = document.createElement('div'); row.className='r';
+    const l = document.createElement('div'); l.innerHTML = label+'<small>'+k+'</small>';
+    const inp = document.createElement('input'); inp.type='range'; inp.min=mn; inp.max=mx; inp.step=st; inp.value=dbgGet(k);
+    const val = document.createElement('div'); val.className='v'; val.textContent = fmt(dbgGet(k),st);
+    inp.addEventListener('input', ()=>{ val.textContent = fmt(inp.value,st); if (k!=='N') dbgSet(k, +inp.value); });
+    inp.addEventListener('change', ()=>{ if (k==='N') dbgSet(k, +inp.value); });
+    row.append(l, inp, val); box.append(row);
+  }
+}
+document.getElementById('bDbg').onclick = ()=>{ const d=document.getElementById('dbg'); d.classList.toggle('hide'); if(!d.classList.contains('hide')) dbgBuild(); };
+document.getElementById('dbgClose').onclick = ()=>document.getElementById('dbg').classList.add('hide');
+document.getElementById('dbgDef').onclick = ()=>{ for (const [k] of DBG) if (k!=='N') dbgSet(k, k==='fric' ? (S.preset.fric!=null ? S.preset.fric : CFG.fric) : DEF[k]); if (CFG.N!==DEF.N) dbgSet('N',DEF.N); dbgBuild(); };
+document.getElementById('dbgCopy').onclick = async ()=>{
+  const o = {}; for (const [k,,,,st] of DBG) o[k] = +fmt(dbgGet(k),st);
+  const txt = JSON.stringify(Object.assign({preset:curPreset}, o));
+  const ta = document.getElementById('dbgOut'); ta.style.display='block'; ta.value = txt;
+  try{ await navigator.clipboard.writeText(txt); document.getElementById('dbgCopy').textContent='コピーしました'; }
+  catch(e){ ta.focus(); ta.select(); document.getElementById('dbgCopy').textContent='下の文字を選択してコピー'; }
+  setTimeout(()=>document.getElementById('dbgCopy').textContent='値をコピー', 1800);
+};
 
 // ===== LOOP =====
 const SUB = 1/180;
