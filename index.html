@@ -9,7 +9,8 @@
 <style>
 html,body{margin:0;height:100%;background:#0b0d14;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;font-family:-apple-system,system-ui,sans-serif;color:#cfd6e6}
 canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
-#bar{position:fixed;left:0;right:0;bottom:calc(env(safe-area-inset-bottom) + 12px);display:flex;justify-content:center;gap:8px;z-index:2;flex-wrap:wrap;padding:0 12px}
+#bar{position:fixed;left:0;right:0;bottom:calc(env(safe-area-inset-bottom) + 12px);display:flex;flex-direction:column;align-items:center;gap:8px;z-index:2;padding:0 12px}
+#bar .row{display:flex;justify-content:center;gap:8px;flex-wrap:wrap}
 #bar button{appearance:none;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);color:#dfe6f3;font-size:13px;padding:9px 13px;border-radius:999px;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
 #bar button.on{background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.35)}
 #bar .hide{display:none}
@@ -23,11 +24,17 @@ canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
 <canvas id="cv"></canvas>
 <div id="st"></div>
 <div id="bar">
-  <button id="bLadder" class="on">段々ルート</button>
-  <button id="bGlass">砂時計</button>
+  <div class="row" id="shapes">
+    <button data-p="ladder" class="on">段々</button>
+    <button data-p="glass">砂時計</button>
+    <button data-p="coil">ぐるぐる</button>
+    <button data-p="maze">迷路</button>
+  </div>
+  <div class="row">
   <button id="bReset">リセット</button>
   <button id="bFlip" class="hide">反転</button>
   <button id="bInv" class="hide">軸反転</button>
+  </div>
 </div>
 <div id="start"><b>OIL TIMER</b><span>タップして開始<br>スマホを傾けるとオイルが流れます</span></div>
 <script>
@@ -85,6 +92,83 @@ function presetGlass(){
   return { outline, lines:[], spawnY:[28,200], colors:[[255,176,46],[150,96,255]] };
 }
 
+// ぐるぐる：漏斗から下り続ける蛇行パイプ。中心線がyに単調なので逆さでも逆流する
+let PIPE_W = 12, FRIC_COIL = 0.03, FRIC_MAZE = 0.08, MAZE_SLOPE = 0.28;      // パイプ壁の中心から中心線までの距離
+function presetCoil(){
+  const outline = [[20,20],[280,20],[280,580],[20,580]];
+  const xL = 58, xR = 242, xm = W/2, y0 = 132, y1 = 146, rt = 22;
+  // 下り勾配 s を全体の高さから逆算：2本の半ラン(92)+3本の全ラン(184)+4ターン
+  const halfL = xR-xm, fullL = xR-xL;
+  const s = ((H-y1) - y1 - 8*rt) / (2*halfL + 3*fullL);
+  const cl = [[xm,y0],[xm,y1]];
+  let x = xm, y = y1, dir = 1;
+  const runs = [halfL, fullL, fullL, fullL, halfL];
+  for (let r=0;r<5;r++){
+    x += dir*runs[r]; y += s*runs[r]; cl.push([x,y]);
+    if (r<4){
+      const cx = x, cy = y+rt;            // 外側へ半円ターン
+      for (let k=1;k<=14;k++){
+        const a = -Math.PI/2 + Math.PI*k/14;
+        cl.push([cx + dir*Math.cos(a)*rt, cy + Math.sin(a)*rt]);
+      }
+      y += 2*rt; dir = -dir;
+    }
+  }
+  cl.push([xm, H-y0]);
+  // 中心線を左右にオフセットして壁にする
+  const off = (sgn)=>cl.map((p,i)=>{
+    const a = cl[Math.max(0,i-1)], b = cl[Math.min(cl.length-1,i+1)];
+    let tx = b[0]-a[0], ty = b[1]-a[1]; const l = Math.hypot(tx,ty); tx/=l; ty/=l;
+    return [p[0] - ty*PIPE_W*sgn, p[1] + tx*PIPE_W*sgn];
+  });
+  const A = off(1), B = off(-1), lines = [];
+  for (const P of [A,B]) for (let i=0;i<P.length-1;i++) lines.push([P[i],P[i+1]]);
+  // 上下の漏斗
+  const fun = [[[20,96],A[0]],[[280,96],B[0]]];
+  for (const [a,b] of fun){ lines.push([a,b]); lines.push([rotP(a),rotP(b)]); }
+  return { outline, lines, spawnY:[28,90], fric:FRIC_COIL, colors:[[52,230,160],[255,96,84]] };
+}
+
+// 迷路：少し傾いた床（両端に穴）と縦の仕切り。180°回転対称
+function presetMaze(){
+  const outline = [[20,20],[280,20],[280,580],[20,580]];
+  const G = LADDER_HOLE, lines = [];
+  // [y, [[x0,x1,低い側]...]]  低い側 'L'|'R'
+  const levels = [
+    [100, [[20,110,'R'],[110,280,'L']]],
+    [152, [[20,72,'L'],[72,196,'R'],[196,280,'R']]],
+    [204, [[20,134,'L'],[134,224,'R'],[224,280,'L']]],
+    [256, [[20,92,'R'],[92,202,'L'],[202,280,'R']]],
+  ];
+  const center = [300, [[20,150,'L'],[150,280,'L']]];   // 自己対称
+  const build = (y, spec, prevY, out)=>{
+    for (let i=0;i<spec.length;i++){
+      const [x0,x1,d] = spec[i];
+      const a = x0 + (x0<=20 ? G : G/2), b = x1 - (x1>=280 ? G : G/2);
+      const dl = Math.min(22, (b-a)*MAZE_SLOPE);
+      const ya = d==='R' ? y-dl/2 : y+dl/2, yb = d==='R' ? y+dl/2 : y-dl/2;
+      out.push([[a,ya],[b,yb]]);
+      // 高い側に縦の仕切り（上の床まで届かせない）
+      if (prevY!=null){
+        const hx = d==='R' ? a : b, hy = d==='R' ? ya : yb;
+        if (hx>20+G && hx<280-G) out.push([[hx,hy],[hx,prevY+26]]);
+      }
+    }
+  };
+  const half = [];
+  let prev = null;
+  for (const [y,spec] of levels){ build(y,spec,prev,half); prev = y; }
+  for (const l of half){ lines.push(l); lines.push([rotP(l[0]),rotP(l[1])]); }
+  const cen = [];
+  build(center[0], center[1], prev, cen);
+  for (const l of cen){
+    lines.push(l);
+    if (l[0][0]===l[1][0]) lines.push([rotP(l[0]),rotP(l[1])]);   // 中央の仕切りも対称に
+  }
+  return { outline, lines, spawnY:[28,86], fric:FRIC_MAZE, colors:[[255,214,64],[86,130,255]] };
+}
+const PRESETS = { ladder:presetLadder, glass:presetGlass, coil:presetCoil, maze:presetMaze };
+
 function pointInPoly(x, y, poly){
   let c = false;
   for (let i=0,j=poly.length-1;i<poly.length;j=i++){
@@ -101,6 +185,7 @@ function distSeg(x, y, s){
 
 function loadPreset(p){
   S.preset = p;
+  S.fric = p.fric!=null ? p.fric : CFG.fric;
   S.outline = p.outline;
   S.segs = [];
   const o = p.outline;
@@ -187,7 +272,7 @@ function step(){
 
 function collide(){
   const n=S.n, x=S.x, y=S.y, px=S.px, py=S.py, segs=S.segs;
-  const R=CFG.pr+CFG.wr, R2=R*R, fr=CFG.fric;
+  const R=CFG.pr+CFG.wr, R2=R*R, fr=S.fric;
   for (let i=0;i<n;i++){
     let xi=x[i], yi=y[i];
     for (let k=0;k<segs.length;k++){
@@ -231,7 +316,7 @@ let view = { s:1, cx:0, cy:0, dpr:1 };
 function resize(){
   const dpr = Math.min(window.devicePixelRatio||1, 2.5);
   cv.width = Math.round(innerWidth*dpr); cv.height = Math.round(innerHeight*dpr);
-  const barH = 70, pad = 18;
+  const barH = 112, pad = 14;
   const s = Math.min((innerWidth-pad*2)/W, (innerHeight-barH-pad*2)/H);
   view = { s, cx:innerWidth/2, cy:(innerHeight-barH)/2+6, dpr };
 }
@@ -306,11 +391,15 @@ function draw(){
   ctx.drawImage(off,0,0,FW*FS,FH*FS);
   // 内部パーツ
   ctx.lineCap='round';
+  // つながった線分は1本のパスにまとめて描く（継ぎ目の点を出さない）
+  ctx.lineJoin='round'; ctx.beginPath();
+  let le = null;
   for (const [a,b] of S.preset.lines){
-    ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]);
-    ctx.lineWidth=CFG.wr*2; ctx.strokeStyle='rgba(210,228,255,.55)'; ctx.stroke();
-    ctx.lineWidth=1; ctx.strokeStyle='rgba(255,255,255,.75)'; ctx.stroke();
+    if (!le || Math.abs(le[0]-a[0])>0.01 || Math.abs(le[1]-a[1])>0.01) ctx.moveTo(a[0],a[1]);
+    ctx.lineTo(b[0],b[1]); le = b;
   }
+  ctx.lineWidth=CFG.wr*2; ctx.strokeStyle='rgba(210,228,255,.55)'; ctx.stroke();
+  ctx.lineWidth=1; ctx.strokeStyle='rgba(255,255,255,.75)'; ctx.stroke();
   // 内壁
   pathOutline(); ctx.lineWidth=CFG.wr*2; ctx.strokeStyle='rgba(210,228,255,.35)'; ctx.stroke();
   // ガラスの反射
@@ -365,15 +454,16 @@ document.getElementById('start').addEventListener('click', async ()=>{
   }catch(e){ enableManual(e && e.name || 'エラー'); }
 });
 
+let curPreset = 'ladder';
 function setPreset(which){
-  loadPreset(which==='glass'?presetGlass():presetLadder());
-  document.getElementById('bLadder').classList.toggle('on', which!=='glass');
-  document.getElementById('bGlass').classList.toggle('on', which==='glass');
+  curPreset = PRESETS[which] ? which : 'ladder';
+  loadPreset(PRESETS[curPreset]());
+  for (const b of document.querySelectorAll('#shapes button')) b.classList.toggle('on', b.dataset.p===curPreset);
   manual.ang = manual.target = 0;
+  try{ localStorage.setItem('oiltimer_preset', curPreset); }catch(e){}
 }
-document.getElementById('bLadder').onclick = ()=>setPreset('ladder');
-document.getElementById('bGlass').onclick  = ()=>setPreset('glass');
-document.getElementById('bReset').onclick  = ()=>setPreset(S.preset.outline.length>4?'glass':'ladder');
+for (const b of document.querySelectorAll('#shapes button')) b.onclick = ()=>setPreset(b.dataset.p);
+document.getElementById('bReset').onclick  = ()=>setPreset(curPreset);
 document.getElementById('bFlip').onclick   = ()=>{ manual.target += Math.PI; };
 document.getElementById('bInv').onclick    = ()=>{ inv=!inv; try{localStorage.setItem('oiltimer_inv',inv?'1':'0');}catch(e){} };
 
@@ -393,7 +483,8 @@ function frame(now){
   requestAnimationFrame(frame);
 }
 resize();
-setPreset('ladder');
+let savedP = 'ladder'; try{ savedP = localStorage.getItem('oiltimer_preset') || 'ladder'; }catch(e){}
+setPreset(savedP);
 requestAnimationFrame(frame);
 </script>
 </body>
