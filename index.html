@@ -93,8 +93,8 @@ function presetGlass(){
   return { outline, lines:[], spawnY:[28,200], colors:[[255,176,46],[150,96,255]] };
 }
 
-// ぐるぐる：大中小のリングに穴。全リングに真上・真下の穴があり、180°回転対称
-let RING_HOLE = 20, FRIC_COIL = 0.12, FRIC_MAZE = 0.08, MAZE_SLOPE = 0.28;
+// ぐるぐる（蚊取り線香）
+let RING_HOLE = 20, COIL_GAP = 21, COIL_IN = 154, FRIC_COIL = 0.12, FRIC_MAZE = 0.08, MAZE_SLOPE = 0.28;
 function ringLines(cx, cy, r, gapsDeg, out){
   const G = RING_HOLE;
   const hw = Math.asin(Math.min(0.95, G/2/r));                 // 穴の半角
@@ -117,20 +117,41 @@ function wallFunnel(holeX, yWall, yHole, out){
   out.push([[holeX+G/2, yHole],[280-G-1, yWall]]);
 }
 function presetCoil(){
+  // 蚊取り線香：2本のらせんが交互に巻く（180°回転対称）。各巻きの最下点・最上点に穴＋巻きごとに違う位置の穴
   const outline = [[20,20],[280,20],[280,580],[20,580]];
-  const half = [];
-  wallFunnel(150, 84, 116, half);
-  // [cx, cy, r, 追加の穴(度) 0=右 90=下]
-  const rings = [
-    [122,172,34,[300,200,20]],
-    [212,146,14,[0]],
-    [224,214,24,[170,320]],
-    [66,252,22,[0]],
-  ];
-  for (const [cx,cy,r,g] of rings) ringLines(cx,cy,r,[90,270,...g],half);
+  const cx = W/2, cy = H/2, r0 = 12, rMax = 110, gap = COIL_GAP;
+  const b = gap/Math.PI;                         // 2本なので1周で 2*gap 外へ
+  const thMax = (rMax - r0)/b;
+  const extra = [[200],[320,150],[230],[30,300],[190]];   // 巻きごとの追加穴（度）
   const lines = [];
-  for (const l of half){ lines.push(l); lines.push([rotP(l[0]),rotP(l[1])]); }
-  ringLines(150,300,56,[90,270,20,200,140,320],lines);   // 中央の大リング（自己対称）
+  const half = RING_HOLE/2;
+  const isGap = (th, r)=>{
+    const k = Math.floor(th/(Math.PI*2));
+    const phi = Math.atan(b/r);                  // らせんの最下点・最上点は少しずれる
+    const cand = [Math.PI/2+phi, Math.PI*1.5+phi, ...(extra[k]||[]).map(d=>d*Math.PI/180)];
+    const hw = Math.asin(Math.min(0.99, half/r));
+    const a = ((th % (Math.PI*2)) + Math.PI*2) % (Math.PI*2);
+    for (const c of cand){
+      let d = Math.abs(a-c); d = Math.min(d, Math.PI*2-d);
+      if (d < hw) return true;
+    }
+    return false;
+  };
+  const pts = [];
+  for (let th=0; th<=thMax; th+=0.06){
+    const r = r0 + b*th;
+    pts.push([th, r, !isGap(th,r)]);
+  }
+  for (let arm=0; arm<2; arm++){
+    for (let i=0;i<pts.length-1;i++){
+      if (!pts[i][2] || !pts[i+1][2]) continue;
+      const p = (q)=>{ const a=q[0]+arm*Math.PI; return [cx+Math.cos(a)*q[1], cy+Math.sin(a)*q[1]]; };
+      lines.push([p(pts[i]), p(pts[i+1])]);
+    }
+  }
+  const fun = [];
+  wallFunnel(COIL_IN, 84, 118, fun);
+  for (const l of fun){ lines.push(l); lines.push([rotP(l[0]),rotP(l[1])]); }
   return { outline, lines, spawnY:[28,80], spawnX:[36,264], fric:FRIC_COIL, colors:[[52,230,160],[255,96,84]] };
 }
 
@@ -139,7 +160,7 @@ let GEAR_K = 6e-6, GEAR_DAMP = 0.994, GEAR_MAXW = 0.03;
 function presetGear(){
   const outline = [[20,20],[280,20],[280,580],[20,580]];
   const half = [];
-  wallFunnel(116, 82, 124, half);
+  wallFunnel(150, 82, 124, half);
   const lines = [];
   for (const l of half){ lines.push(l); lines.push([rotP(l[0]),rotP(l[1])]); }
   const R1 = 64, R2 = 30, D = R1 + R2 - 8;
